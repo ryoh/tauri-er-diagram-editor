@@ -11,6 +11,30 @@ import type { TableData, RelationData } from "../types/diagram";
 
 export type DiagramMode = "ie" | "t-shape";
 
+/** Shape of the JSON returned by core::parse_atlas_hcl (camelCase via serde) */
+export interface CoreDiagram {
+  tables: CoreTable[];
+  relations: CoreRelation[];
+}
+interface CoreTable {
+  id: string;
+  name: string;
+  logicalName: string;
+  entityType: "resource" | "event" | "normal";
+  columns: Array<{
+    name: string; dataType: string;
+    isPk: boolean; isFk: boolean; notNull: boolean; comment: string;
+  }>;
+  position: [number, number];
+}
+interface CoreRelation {
+  id: string;
+  fromTableId: string; fromColumn: string;
+  toTableId: string;   toColumn: string;
+  fromCardinality: string;
+  toCardinality: string;
+}
+
 interface DiagramState {
   mode: DiagramMode;
   nodes: Node<TableData>[];
@@ -23,6 +47,8 @@ interface DiagramState {
   removeTable: (id: string) => void;
   addRelation: (relation: RelationData) => void;
   removeRelation: (id: string) => void;
+  /** Replace the entire canvas with data parsed by the Rust core. */
+  importFromCore: (diagram: CoreDiagram) => void;
 }
 
 // Sample data for development
@@ -156,4 +182,37 @@ export const useDiagramStore = create<DiagramState>((set) => ({
 
   removeRelation: (id) =>
     set((s) => ({ edges: s.edges.filter((e) => e.id !== id) })),
+
+  importFromCore: (diagram) =>
+    set((s) => {
+      const nodeType = s.mode === "ie" ? "tableNode" : "tNode";
+      const nodes: Node<TableData>[] = diagram.tables.map((t) => ({
+        id: t.id,
+        type: nodeType,
+        position: { x: t.position[0], y: t.position[1] },
+        data: {
+          id: t.id,
+          name: t.name,
+          logicalName: t.logicalName,
+          entityType: t.entityType,
+          columns: t.columns,
+        },
+      }));
+      const edges: Edge<RelationData>[] = diagram.relations.map((r) => ({
+        id: r.id,
+        source: r.fromTableId,
+        target: r.toTableId,
+        type: "ieEdge",
+        data: {
+          id: r.id,
+          fromTableId: r.fromTableId,
+          fromColumn:  r.fromColumn,
+          toTableId:   r.toTableId,
+          toColumn:    r.toColumn,
+          fromCardinality: r.fromCardinality as RelationData["fromCardinality"],
+          toCardinality:   r.toCardinality   as RelationData["toCardinality"],
+        },
+      }));
+      return { nodes, edges };
+    }),
 }));
