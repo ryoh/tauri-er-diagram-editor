@@ -1,7 +1,18 @@
-CREATE TABLE users (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  name VARCHAR(255) NOT NULL,
-  email VARCHAR(255) NOT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_users_email (email)
-);
+table "users" {
+  schema = schema.example
+  column "id" {
+    null = false
+    type = int
+  }
+  column "name" {
+    null = true
+    type = varchar(100)
+  }
+  primary_key {
+    columns = [column.id]
+  }
+}
+schema "example" {
+  charset = "utf8mb4"
+  collate = "utf8mb4_0900_ai_ci"
+}
