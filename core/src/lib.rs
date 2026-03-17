@@ -3,6 +3,7 @@ use wasm_bindgen::prelude::*;
 use sqlparser::dialect::MySqlDialect;
 use sqlparser::parser::Parser as SqlParser;
 use sqlparser::ast::{Statement, ColumnOption, TableConstraint};
+use handlebars::Handlebars;
 
 // ---------------------------------------------------------------------------
 // Data structures
@@ -430,6 +431,346 @@ pub fn parse_auto(input: &str) -> Result<Diagram, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Exporters
+// ---------------------------------------------------------------------------
+
+// ── SQL Export ───────────────────────────────────────────────────────────────
+
+/// Generate standard `CREATE TABLE` SQL from a Diagram.
+pub fn export_sql(diagram: &Diagram) -> String {
+    let mut out = String::new();
+    for table in &diagram.tables {
+        // Header comment
+        if !table.logical_name.is_empty() {
+            out.push_str(&format!("-- {} ({})\n", table.name, table.logical_name));
+        } else {
+            out.push_str(&format!("-- {}\n", table.name));
+        }
+        out.push_str(&format!("CREATE TABLE `{}` (\n", table.name));
+
+        let mut lines: Vec<String> = Vec::new();
+
+        for col in &table.columns {
+            let null_clause = if col.not_null { " NOT NULL" } else { " NULL" };
+            let comment_clause = if col.comment.is_empty() {
+                String::new()
+            } else {
+                format!(" COMMENT '{}'", col.comment.replace('\'', "''"))
+            };
+            lines.push(format!(
+                "  `{}` {}{}{}",
+                col.name, col.data_type, null_clause, comment_clause
+            ));
+        }
+
+        // PRIMARY KEY constraint
+        let pk_cols: Vec<String> = table.columns.iter()
+            .filter(|c| c.is_pk)
+            .map(|c| format!("`{}`", c.name))
+            .collect();
+        if !pk_cols.is_empty() {
+            lines.push(format!("  PRIMARY KEY ({})", pk_cols.join(", ")));
+        }
+
+        // FOREIGN KEY constraints (from relations that originate at this table)
+        for rel in &diagram.relations {
+            if rel.from_table_id == table.id {
+                lines.push(format!(
+                    "  CONSTRAINT `{}` FOREIGN KEY (`{}`) REFERENCES `{}` (`{}`)",
+                    rel.id, rel.from_column, rel.to_table_id, rel.to_column
+                ));
+            }
+        }
+
+        out.push_str(&lines.join(",\n"));
+        out.push_str("\n);\n\n");
+    }
+    out
+}
+
+// ── Atlas HCL Export ─────────────────────────────────────────────────────────
+
+/// Serialise a Diagram to Atlas HCL format.
+pub fn export_hcl(diagram: &Diagram) -> String {
+    let mut out = String::new();
+    for table in &diagram.tables {
+        out.push_str(&format!("table \"{}\" {{\n", table.name));
+
+        for col in &table.columns {
+            out.push_str(&format!("  column \"{}\" {{\n", col.name));
+            out.push_str(&format!("    null = {}\n", !col.not_null));
+            // Use lowercase for Atlas HCL type expressions
+            out.push_str(&format!("    type = {}\n", col.data_type.to_lowercase()));
+            if !col.comment.is_empty() {
+                out.push_str(&format!("    comment = \"{}\"\n", col.comment.replace('"', "\\\"")));
+            }
+            out.push_str("  }\n");
+        }
+
+        // primary_key
+        let pk_cols: Vec<String> = table.columns.iter()
+            .filter(|c| c.is_pk)
+            .map(|c| format!("column.{}", c.name))
+            .collect();
+        if !pk_cols.is_empty() {
+            out.push_str("  primary_key {\n");
+            out.push_str(&format!("    columns = [{}]\n", pk_cols.join(", ")));
+            out.push_str("  }\n");
+        }
+
+        // foreign_key blocks
+        for rel in &diagram.relations {
+            if rel.from_table_id == table.id {
+                out.push_str(&format!("  foreign_key \"{}\" {{\n", rel.id));
+                out.push_str(&format!("    columns     = [column.{}]\n", rel.from_column));
+                out.push_str(&format!(
+                    "    ref_columns = [table.{}.column.{}]\n",
+                    rel.to_table_id, rel.to_column
+                ));
+                out.push_str("    on_update   = NO_ACTION\n");
+                out.push_str("    on_delete   = NO_ACTION\n");
+                out.push_str("  }\n");
+            }
+        }
+
+        out.push_str("}\n\n");
+    }
+    out
+}
+
+// ── HTML Export ──────────────────────────────────────────────────────────────
+
+fn cardinality_label(c: &Cardinality) -> &'static str {
+    match c {
+        Cardinality::One        => "1",
+        Cardinality::ZeroOrOne  => "0..1",
+        Cardinality::OneOrMany  => "1..N",
+        Cardinality::ZeroOrMany => "0..N",
+    }
+}
+
+fn entity_color(et: &EntityType) -> &'static str {
+    match et {
+        EntityType::Resource => "#3b82f6",
+        EntityType::Event    => "#ef4444",
+        EntityType::Normal   => "#6b7280",
+    }
+}
+
+fn entity_label(et: &EntityType) -> &'static str {
+    match et { EntityType::Resource => "R", EntityType::Event => "E", EntityType::Normal => "" }
+}
+
+#[derive(Serialize)]
+struct HtmlCtx {
+    title: String,
+    generated_at: String,
+    table_count: usize,
+    relation_count: usize,
+    has_relations: bool,
+    tables: Vec<HtmlTableCtx>,
+    relations: Vec<HtmlRelCtx>,
+}
+
+#[derive(Serialize)]
+struct HtmlTableCtx {
+    name: String,
+    logical_name: String,
+    entity_color: String,
+    entity_label: String,
+    col_names: String,
+    columns: Vec<HtmlColCtx>,
+}
+
+#[derive(Serialize)]
+struct HtmlColCtx {
+    name: String,
+    data_type: String,
+    pk: bool,
+    fk: bool,
+    not_null: bool,
+    comment: String,
+}
+
+#[derive(Serialize)]
+struct HtmlRelCtx {
+    from_table: String,
+    from_column: String,
+    cardinality: String,
+    to_table: String,
+    to_column: String,
+}
+
+const HTML_TEMPLATE: &str = r###"<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{title}}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f8fafc;color:#1e293b;line-height:1.6}
+a{color:inherit;text-decoration:none}
+header{background:#1e293b;color:#f8fafc;padding:2rem 2.5rem}
+header h1{font-size:1.75rem;font-weight:700;letter-spacing:-.025em}
+header p{color:#94a3b8;margin-top:.375rem;font-size:.875rem}
+.toolbar{background:#fff;border-bottom:1px solid #e2e8f0;padding:.625rem 2.5rem;position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:1rem}
+#search{flex:1;max-width:340px;padding:.4rem .75rem;border:1px solid #cbd5e1;border-radius:.375rem;font-size:.875rem;outline:none;transition:border-color .15s,box-shadow .15s}
+#search:focus{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12)}
+.toc{display:flex;flex-wrap:wrap;gap:.5rem;padding:1.25rem 2.5rem}
+.toc-chip{padding:.25rem .875rem;border-radius:9999px;font-size:.8125rem;font-weight:600;border:2px solid;transition:all .15s;cursor:pointer}
+.toc-chip:hover{opacity:.8}
+main{padding:0 2.5rem 4rem}
+.table-card{background:#fff;border:1px solid #e2e8f0;border-radius:.75rem;margin-bottom:1.5rem;overflow:hidden}
+.table-card.hidden{display:none}
+.card-head{padding:.875rem 1.25rem;display:flex;align-items:center;gap:.625rem}
+.card-head h2{font-size:1.0625rem;font-weight:700;color:#fff;margin:0}
+.card-head .lg{font-size:.875rem;font-weight:400;opacity:.75;margin-left:.25rem}
+.badge-entity{padding:.125rem .5rem;border-radius:9999px;font-size:.75rem;font-weight:800;background:rgba(255,255,255,.22);color:#fff}
+table{width:100%;border-collapse:collapse}
+th{background:#f8fafc;font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#64748b;padding:.5rem 1rem;text-align:left;border-bottom:2px solid #e2e8f0;white-space:nowrap}
+td{padding:.5625rem 1rem;font-size:.875rem;border-bottom:1px solid #f1f5f9;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:#fafafa}
+.key-cell{display:flex;gap:.25rem;min-width:52px}
+.bpk{font-size:.7rem;font-weight:700;color:#92400e;background:#fef3c7;border:1px solid #fcd34d;padding:.0625rem .375rem;border-radius:9999px}
+.bfk{font-size:.7rem;font-weight:700;color:#1e40af;background:#dbeafe;border:1px solid #93c5fd;padding:.0625rem .375rem;border-radius:9999px}
+code{font-family:"SF Mono",Consolas,monospace;font-size:.8125rem;background:#f1f5f9;color:#475569;padding:.125rem .375rem;border-radius:.25rem}
+.nn{color:#0f766e;font-weight:600}
+.cm{color:#94a3b8;font-size:.8125rem}
+.rel-section{background:#fff;border:1px solid #e2e8f0;border-radius:.75rem;padding:1.5rem;margin-bottom:1.5rem}
+.rel-section h2{font-size:1rem;font-weight:700;margin-bottom:1rem;color:#475569;text-transform:uppercase;letter-spacing:.05em}
+.card-sym{font-family:monospace;background:#f1f5f9;padding:.125rem .5rem;border-radius:.25rem;font-size:.8125rem;white-space:nowrap}
+footer{text-align:center;padding:2rem;color:#94a3b8;font-size:.75rem;border-top:1px solid #e2e8f0;margin-top:2rem}
+</style>
+</head>
+<body>
+<header>
+  <h1>{{title}}</h1>
+  <p>生成日時: {{generated_at}} &nbsp;|&nbsp; テーブル: {{table_count}} &nbsp;|&nbsp; リレーション: {{relation_count}}</p>
+</header>
+<div class="toolbar">
+  <input id="search" type="search" placeholder="テーブル名・カラム名で絞り込む…" oninput="doFilter(this.value)" autocomplete="off">
+  <span id="hit-count" style="font-size:.8125rem;color:#94a3b8"></span>
+</div>
+<div class="toc">
+  {{#each tables}}
+  <a class="toc-chip" href="#t-{{name}}" style="border-color:{{entity_color}};color:{{entity_color}}">{{name}}{{#if logical_name}}&nbsp;<span style="font-weight:400;opacity:.7">{{logical_name}}</span>{{/if}}</a>
+  {{/each}}
+</div>
+<main id="main">
+{{#each tables}}
+<div class="table-card" id="t-{{name}}" data-s="{{name}} {{logical_name}} {{col_names}}">
+  <div class="card-head" style="background:{{entity_color}}">
+    {{#if entity_label}}<span class="badge-entity">{{entity_label}}</span>{{/if}}
+    <h2>{{name}}{{#if logical_name}}<span class="lg">{{logical_name}}</span>{{/if}}</h2>
+  </div>
+  <table>
+    <thead><tr><th style="width:72px">Key</th><th>カラム名</th><th>データ型</th><th style="width:76px;text-align:center">NOT NULL</th><th>コメント</th></tr></thead>
+    <tbody>
+    {{#each columns}}
+    <tr>
+      <td><div class="key-cell">{{#if pk}}<span class="bpk">PK</span>{{/if}}{{#if fk}}<span class="bfk">FK</span>{{/if}}</div></td>
+      <td style="font-weight:{{#if pk}}600{{else}}400{{/if}}">{{name}}</td>
+      <td><code>{{data_type}}</code></td>
+      <td style="text-align:center">{{#if not_null}}<span class="nn">●</span>{{/if}}</td>
+      <td class="cm">{{comment}}</td>
+    </tr>
+    {{/each}}
+    </tbody>
+  </table>
+</div>
+{{/each}}
+{{#if has_relations}}
+<div class="rel-section">
+  <h2>リレーション一覧</h2>
+  <table>
+    <thead><tr><th>FROM テーブル</th><th>FROM カラム</th><th style="text-align:center">多重度</th><th>TO テーブル</th><th>TO カラム</th></tr></thead>
+    <tbody>
+    {{#each relations}}
+    <tr>
+      <td><a href="#t-{{from_table}}" style="color:#3b82f6">{{from_table}}</a></td>
+      <td>{{from_column}}</td>
+      <td style="text-align:center"><span class="card-sym">{{cardinality}}</span></td>
+      <td><a href="#t-{{to_table}}" style="color:#3b82f6">{{to_table}}</a></td>
+      <td>{{to_column}}</td>
+    </tr>
+    {{/each}}
+    </tbody>
+  </table>
+</div>
+{{/if}}
+</main>
+<footer>Generated by ER Diagram Editor</footer>
+<script>
+function doFilter(q){
+  q=q.trim().toLowerCase();
+  var cards=document.querySelectorAll('.table-card');
+  var n=0;
+  cards.forEach(function(c){
+    var show=!q||c.dataset.s.toLowerCase().includes(q);
+    c.classList.toggle('hidden',!show);
+    if(show)n++;
+  });
+  document.getElementById('hit-count').textContent=q?n+' / '+cards.length+' 件':'';
+}
+</script>
+</body>
+</html>
+"###;
+
+/// Generate a full HTML table-definition document from a Diagram.
+pub fn export_html(diagram: &Diagram, title: &str, generated_at: &str) -> Result<String, String> {
+    let mut hb = Handlebars::new();
+    hb.register_template_string("html", HTML_TEMPLATE)
+        .map_err(|e| e.to_string())?;
+
+    let tables: Vec<HtmlTableCtx> = diagram.tables.iter().map(|t| {
+        let col_names = t.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(" ");
+        HtmlTableCtx {
+            name: t.name.clone(),
+            logical_name: t.logical_name.clone(),
+            entity_color: entity_color(&t.entity_type).to_string(),
+            entity_label: entity_label(&t.entity_type).to_string(),
+            col_names,
+            columns: t.columns.iter().map(|c| HtmlColCtx {
+                name: c.name.clone(),
+                data_type: c.data_type.clone(),
+                pk: c.is_pk,
+                fk: c.is_fk,
+                not_null: c.not_null,
+                comment: c.comment.clone(),
+            }).collect(),
+        }
+    }).collect();
+
+    let relations: Vec<HtmlRelCtx> = diagram.relations.iter().map(|r| HtmlRelCtx {
+        from_table: r.from_table_id.clone(),
+        from_column: r.from_column.clone(),
+        cardinality: format!(
+            "{} : {}",
+            cardinality_label(&r.from_cardinality),
+            cardinality_label(&r.to_cardinality)
+        ),
+        to_table: r.to_table_id.clone(),
+        to_column: r.to_column.clone(),
+    }).collect();
+
+    let has_relations = !relations.is_empty();
+    let ctx = HtmlCtx {
+        title: title.to_string(),
+        generated_at: generated_at.to_string(),
+        table_count: tables.len(),
+        relation_count: relations.len(),
+        has_relations,
+        tables,
+        relations,
+    };
+
+    hb.render("html", &ctx).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
 // wasm-bindgen public API
 // ---------------------------------------------------------------------------
 
@@ -466,6 +807,31 @@ pub fn import_sql(sql_str: &str) -> Result<String, JsValue> {
 pub fn import_auto(input: &str) -> Result<String, JsValue> {
     parse_auto(input)
         .and_then(|d| d.to_json().map_err(|e| e.to_string()))
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Generate CREATE TABLE SQL from a Diagram JSON string.
+#[wasm_bindgen]
+pub fn export_sql_wasm(json: &str) -> Result<String, JsValue> {
+    Diagram::from_json(json)
+        .map(|d| export_sql(&d))
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Serialise a Diagram JSON string to Atlas HCL.
+#[wasm_bindgen]
+pub fn export_hcl_wasm(json: &str) -> Result<String, JsValue> {
+    Diagram::from_json(json)
+        .map(|d| export_hcl(&d))
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Generate an HTML table-definition document from a Diagram JSON string.
+#[wasm_bindgen]
+pub fn export_html_wasm(json: &str, title: &str, generated_at: &str) -> Result<String, JsValue> {
+    Diagram::from_json(json)
+        .map_err(|e| e.to_string())
+        .and_then(|d| export_html(&d, title, generated_at))
         .map_err(|e| JsValue::from_str(&e))
 }
 

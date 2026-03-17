@@ -9,6 +9,7 @@ import {
 } from "@xyflow/react";
 import { useDiagramStore } from "./store/useDiagramStore";
 import { useFileSystem }   from "./hooks/useFileSystem";
+import ExportMenu          from "./components/ExportMenu";
 import TableNode from "./components/nodes/TableNode";
 import TNode     from "./components/nodes/TNode";
 import IEEdge    from "./components/edges/IEEdge";
@@ -56,13 +57,16 @@ export default function App() {
           </button>
         </div>
 
-        {/* Import button */}
-        <button
-          onClick={importHcl}
-          className="ml-4 px-3 py-1 text-xs font-semibold rounded border border-gray-300 bg-white text-gray-700 hover:bg-gray-100 transition-colors"
-        >
-          Atlas HCL を開く
-        </button>
+        {/* Import / Export */}
+        <div className="flex items-center gap-2 ml-4">
+          <button
+            onClick={importHcl}
+            className="px-3 py-1 text-xs font-semibold rounded border border-gray-300 bg-white text-gray-700 hover:bg-gray-100 transition-colors"
+          >
+            Atlas HCL を開く
+          </button>
+          <ExportMenu />
+        </div>
 
         <div className="flex items-center gap-2 ml-auto text-xs text-gray-400">
           <span className="inline-block w-3 h-3 rounded-sm bg-blue-500" /> Resource (R)
