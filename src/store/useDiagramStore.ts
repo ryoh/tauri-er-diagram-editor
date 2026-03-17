@@ -41,10 +41,12 @@ interface DiagramState {
   edges: Edge<RelationData>[];
 
   setMode: (mode: DiagramMode) => void;
+  setNodes: (nodes: Node<TableData>[]) => void;
   onNodesChange: (changes: NodeChange[]) => void;
   onEdgesChange: (changes: EdgeChange[]) => void;
   addTable: (table: TableData, position?: { x: number; y: number }) => void;
   removeTable: (id: string) => void;
+  updateTableData: (id: string, data: Partial<TableData>) => void;
   addRelation: (relation: RelationData) => void;
   removeRelation: (id: string) => void;
   /** Replace the entire canvas with data parsed by the Rust core. */
@@ -135,7 +137,13 @@ export const useDiagramStore = create<DiagramState>((set) => ({
         ...n,
         type: mode === "ie" ? "tableNode" : "tNode",
       })),
+      edges: s.edges.map((e) => ({
+        ...e,
+        type: mode === "ie" ? "ieEdge" : "tEdge",
+      })),
     })),
+
+  setNodes: (nodes) => set({ nodes }),
 
   onNodesChange: (changes) =>
     set((s) => ({
@@ -164,6 +172,13 @@ export const useDiagramStore = create<DiagramState>((set) => ({
     set((s) => ({
       nodes: s.nodes.filter((n) => n.id !== id),
       edges: s.edges.filter((e) => e.source !== id && e.target !== id),
+    })),
+
+  updateTableData: (id, data) =>
+    set((s) => ({
+      nodes: s.nodes.map((n) =>
+        n.id === id ? { ...n, data: { ...n.data, ...data } } : n
+      ),
     })),
 
   addRelation: (relation) =>
@@ -198,11 +213,12 @@ export const useDiagramStore = create<DiagramState>((set) => ({
           columns: t.columns,
         },
       }));
+      const edgeType = s.mode === "ie" ? "ieEdge" : "tEdge";
       const edges: Edge<RelationData>[] = diagram.relations.map((r) => ({
         id: r.id,
         source: r.fromTableId,
         target: r.toTableId,
-        type: "ieEdge",
+        type: edgeType,
         data: {
           id: r.id,
           fromTableId: r.fromTableId,
