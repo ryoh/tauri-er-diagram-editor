@@ -1,0 +1,6 @@
+@import "tailwindcss";
+
+/* React Flow override: full-height canvas */
+.react-flow__renderer {
+  background-color: #f8fafc;
+}

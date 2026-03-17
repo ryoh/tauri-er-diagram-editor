@@ -1,51 +1,91 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import {
+  ReactFlow,
+  Controls,
+  MiniMap,
+  Background,
+  BackgroundVariant,
+  type NodeTypes,
+  type EdgeTypes,
+} from "@xyflow/react";
+import { useDiagramStore } from "./store/useDiagramStore";
+import TableNode from "./components/nodes/TableNode";
+import TNode     from "./components/nodes/TNode";
+import IEEdge    from "./components/edges/IEEdge";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+const nodeTypes: NodeTypes = {
+  tableNode: TableNode as never,
+  tNode:     TNode     as never,
+};
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
+const edgeTypes: EdgeTypes = {
+  ieEdge: IEEdge as never,
+};
+
+export default function App() {
+  const { nodes, edges, mode, setMode, onNodesChange, onEdgesChange } =
+    useDiagramStore();
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
+    <div className="w-screen h-screen flex flex-col bg-gray-100">
+      {/* ── Toolbar ───────────────────────────────────────── */}
+      <header className="flex items-center gap-3 px-4 py-2 bg-white border-b border-gray-200 shadow-sm shrink-0">
+        <span className="font-bold text-gray-700 text-sm tracking-wide">ER Diagram Editor</span>
 
-      <div className="row">
-        <a href="https://vitejs.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://reactjs.org" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
+        <div className="flex rounded overflow-hidden border border-gray-300 ml-2">
+          <button
+            onClick={() => setMode("ie")}
+            className={`px-3 py-1 text-xs font-semibold transition-colors ${
+              mode === "ie"
+                ? "bg-blue-500 text-white"
+                : "bg-white text-gray-600 hover:bg-gray-100"
+            }`}
+          >
+            IE 記法
+          </button>
+          <button
+            onClick={() => setMode("t-shape")}
+            className={`px-3 py-1 text-xs font-semibold transition-colors ${
+              mode === "t-shape"
+                ? "bg-blue-500 text-white"
+                : "bg-white text-gray-600 hover:bg-gray-100"
+            }`}
+          >
+            T字形
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2 ml-auto text-xs text-gray-400">
+          <span className="inline-block w-3 h-3 rounded-sm bg-blue-500" /> Resource (R)
+          <span className="inline-block w-3 h-3 rounded-sm bg-red-500  ml-2" /> Event (E)
+          <span className="inline-block w-3 h-3 rounded-sm bg-gray-500 ml-2" /> Normal
+        </div>
+      </header>
+
+      {/* ── Canvas ────────────────────────────────────────── */}
+      <div className="flex-1 relative">
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
+          onNodesChange={onNodesChange}
+          onEdgesChange={onEdgesChange}
+          fitView
+          fitViewOptions={{ padding: 0.2 }}
+          proOptions={{ hideAttribution: true }}
+        >
+          <Controls />
+          <MiniMap
+            nodeColor={(n) => {
+              const et = (n.data as { entityType?: string })?.entityType;
+              if (et === "resource") return "#3b82f6";
+              if (et === "event")    return "#ef4444";
+              return "#6b7280";
+            }}
+          />
+          <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#cbd5e1" />
+        </ReactFlow>
       </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+    </div>
   );
 }
-
-export default App;
