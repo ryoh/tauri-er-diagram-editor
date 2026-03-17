@@ -4,16 +4,26 @@
  * Ctrl+S  → JSON エクスポート
  * Ctrl+L  → 自動レイアウト
  * Ctrl+K  → クイックサーチ
+ * Ctrl+Z  → Undo
+ * Ctrl+Shift+Z → Redo
+ * Ctrl++  → ズームイン
+ * Ctrl+-  → ズームアウト
+ * Ctrl+Shift+F → Fit View
  */
 import { useEffect } from "react";
 
 interface Handlers {
-  onSave:   () => void;
-  onLayout: () => void;
-  onSearch: () => void;
+  onSave:    () => void;
+  onLayout:  () => void;
+  onSearch:  () => void;
+  onUndo:    () => void;
+  onRedo:    () => void;
+  onZoomIn:  () => void;
+  onZoomOut: () => void;
+  onFitView: () => void;
 }
 
-export function useKeyboardShortcuts({ onSave, onLayout, onSearch }: Handlers) {
+export function useKeyboardShortcuts(handlers: Handlers) {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       // Ignore when the user is typing in an input/textarea
@@ -24,15 +34,38 @@ export function useKeyboardShortcuts({ onSave, onLayout, onSearch }: Handlers) {
         switch (e.key.toLowerCase()) {
           case "s":
             e.preventDefault();
-            onSave();
+            handlers.onSave();
             break;
           case "l":
             e.preventDefault();
-            onLayout();
+            handlers.onLayout();
             break;
           case "k":
             e.preventDefault();
-            onSearch();
+            handlers.onSearch();
+            break;
+          case "z":
+            e.preventDefault();
+            if (e.shiftKey) {
+              handlers.onRedo();
+            } else {
+              handlers.onUndo();
+            }
+            break;
+          case "=": // Ctrl++ (unshifted)
+          case "+":
+            e.preventDefault();
+            handlers.onZoomIn();
+            break;
+          case "-":
+            e.preventDefault();
+            handlers.onZoomOut();
+            break;
+          case "f":
+            if (e.shiftKey) {
+              e.preventDefault();
+              handlers.onFitView();
+            }
             break;
         }
       }
@@ -40,5 +73,5 @@ export function useKeyboardShortcuts({ onSave, onLayout, onSearch }: Handlers) {
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [onSave, onLayout, onSearch]);
+  }, [handlers]);
 }

@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { temporal } from "zundo";
 import {
   applyNodeChanges,
   applyEdgeChanges,
@@ -7,7 +8,7 @@ import {
   type NodeChange,
   type EdgeChange,
 } from "@xyflow/react";
-import type { TableData, RelationData } from "../types/diagram";
+import type { TableData, RelationData, EntityType } from "../types/diagram";
 
 export type DiagramMode = "ie" | "t-shape";
 
@@ -35,10 +36,19 @@ interface CoreRelation {
   toCardinality: string;
 }
 
+export interface DiagramSettings {
+  showGrid: boolean;
+  darkMode: boolean;
+  defaultEntityType: EntityType;
+  defaultMode: DiagramMode;
+}
+
 interface DiagramState {
   mode: DiagramMode;
   nodes: Node<TableData>[];
   edges: Edge<RelationData>[];
+  settings: DiagramSettings;
+  currentFile: string | null;
 
   setMode: (mode: DiagramMode) => void;
   setNodes: (nodes: Node<TableData>[]) => void;
@@ -51,6 +61,8 @@ interface DiagramState {
   removeRelation: (id: string) => void;
   /** Replace the entire canvas with data parsed by the Rust core. */
   importFromCore: (diagram: CoreDiagram) => void;
+  updateSettings: (patch: Partial<DiagramSettings>) => void;
+  setCurrentFile: (name: string | null) => void;
 }
 
 // Sample data for development
@@ -125,110 +137,134 @@ const SAMPLE_EDGES: Edge<RelationData>[] = [
   },
 ];
 
-export const useDiagramStore = create<DiagramState>((set) => ({
-  mode: "ie",
-  nodes: SAMPLE_NODES,
-  edges: SAMPLE_EDGES,
+export const useDiagramStore = create<DiagramState>()(
+  temporal(
+    (set) => ({
+      mode: "ie",
+      nodes: SAMPLE_NODES,
+      edges: SAMPLE_EDGES,
+      settings: {
+        showGrid: true,
+        darkMode: false,
+        defaultEntityType: "normal",
+        defaultMode: "ie",
+      },
+      currentFile: null,
 
-  setMode: (mode) =>
-    set((s) => ({
-      mode,
-      nodes: s.nodes.map((n) => ({
-        ...n,
-        type: mode === "ie" ? "tableNode" : "tNode",
-      })),
-      edges: s.edges.map((e) => ({
-        ...e,
-        type: mode === "ie" ? "ieEdge" : "tEdge",
-      })),
-    })),
+      setMode: (mode) =>
+        set((s) => ({
+          mode,
+          nodes: s.nodes.map((n) => ({
+            ...n,
+            type: mode === "ie" ? "tableNode" : "tNode",
+          })),
+          edges: s.edges.map((e) => ({
+            ...e,
+            type: mode === "ie" ? "ieEdge" : "tEdge",
+          })),
+        })),
 
-  setNodes: (nodes) => set({ nodes }),
+      setNodes: (nodes) => set({ nodes }),
 
-  onNodesChange: (changes) =>
-    set((s) => ({
-      nodes: applyNodeChanges(changes, s.nodes as Node[]) as unknown as Node<TableData>[],
-    })),
+      onNodesChange: (changes) =>
+        set((s) => ({
+          nodes: applyNodeChanges(changes, s.nodes as Node[]) as unknown as Node<TableData>[],
+        })),
 
-  onEdgesChange: (changes) =>
-    set((s) => ({
-      edges: applyEdgeChanges(changes, s.edges as Edge[]) as unknown as Edge<RelationData>[],
-    })),
+      onEdgesChange: (changes) =>
+        set((s) => ({
+          edges: applyEdgeChanges(changes, s.edges as Edge[]) as unknown as Edge<RelationData>[],
+        })),
 
-  addTable: (table, position = { x: 100, y: 100 }) =>
-    set((s) => ({
-      nodes: [
-        ...s.nodes,
-        {
-          id: table.id,
-          type: s.mode === "ie" ? "tableNode" : "tNode",
-          position,
-          data: table,
-        },
-      ],
-    })),
+      addTable: (table, position = { x: 100, y: 100 }) =>
+        set((s) => ({
+          nodes: [
+            ...s.nodes,
+            {
+              id: table.id,
+              type: s.mode === "ie" ? "tableNode" : "tNode",
+              position,
+              data: table,
+            },
+          ],
+        })),
 
-  removeTable: (id) =>
-    set((s) => ({
-      nodes: s.nodes.filter((n) => n.id !== id),
-      edges: s.edges.filter((e) => e.source !== id && e.target !== id),
-    })),
+      removeTable: (id) =>
+        set((s) => ({
+          nodes: s.nodes.filter((n) => n.id !== id),
+          edges: s.edges.filter((e) => e.source !== id && e.target !== id),
+        })),
 
-  updateTableData: (id, data) =>
-    set((s) => ({
-      nodes: s.nodes.map((n) =>
-        n.id === id ? { ...n, data: { ...n.data, ...data } } : n
-      ),
-    })),
+      updateTableData: (id, data) =>
+        set((s) => ({
+          nodes: s.nodes.map((n) =>
+            n.id === id ? { ...n, data: { ...n.data, ...data } } : n
+          ),
+        })),
 
-  addRelation: (relation) =>
-    set((s) => ({
-      edges: [
-        ...s.edges,
-        {
-          id: relation.id,
-          source: relation.fromTableId,
-          target: relation.toTableId,
-          type: "ieEdge",
-          data: relation,
-        },
-      ],
-    })),
+      addRelation: (relation) =>
+        set((s) => ({
+          edges: [
+            ...s.edges,
+            {
+              id: relation.id,
+              source: relation.fromTableId,
+              target: relation.toTableId,
+              type: s.mode === "ie" ? "ieEdge" : "tEdge",
+              data: relation,
+            },
+          ],
+        })),
 
-  removeRelation: (id) =>
-    set((s) => ({ edges: s.edges.filter((e) => e.id !== id) })),
+      removeRelation: (id) =>
+        set((s) => ({ edges: s.edges.filter((e) => e.id !== id) })),
 
-  importFromCore: (diagram) =>
-    set((s) => {
-      const nodeType = s.mode === "ie" ? "tableNode" : "tNode";
-      const nodes: Node<TableData>[] = diagram.tables.map((t) => ({
-        id: t.id,
-        type: nodeType,
-        position: { x: t.position[0], y: t.position[1] },
-        data: {
-          id: t.id,
-          name: t.name,
-          logicalName: t.logicalName,
-          entityType: t.entityType,
-          columns: t.columns,
-        },
-      }));
-      const edgeType = s.mode === "ie" ? "ieEdge" : "tEdge";
-      const edges: Edge<RelationData>[] = diagram.relations.map((r) => ({
-        id: r.id,
-        source: r.fromTableId,
-        target: r.toTableId,
-        type: edgeType,
-        data: {
-          id: r.id,
-          fromTableId: r.fromTableId,
-          fromColumn:  r.fromColumn,
-          toTableId:   r.toTableId,
-          toColumn:    r.toColumn,
-          fromCardinality: r.fromCardinality as RelationData["fromCardinality"],
-          toCardinality:   r.toCardinality   as RelationData["toCardinality"],
-        },
-      }));
-      return { nodes, edges };
+      importFromCore: (diagram) =>
+        set((s) => {
+          const nodeType = s.mode === "ie" ? "tableNode" : "tNode";
+          const edgeType = s.mode === "ie" ? "ieEdge" : "tEdge";
+          const nodes: Node<TableData>[] = diagram.tables.map((t) => ({
+            id: t.id,
+            type: nodeType,
+            position: { x: t.position[0], y: t.position[1] },
+            data: {
+              id: t.id,
+              name: t.name,
+              logicalName: t.logicalName,
+              entityType: t.entityType,
+              columns: t.columns,
+            },
+          }));
+          const edges: Edge<RelationData>[] = diagram.relations.map((r) => ({
+            id: r.id,
+            source: r.fromTableId,
+            target: r.toTableId,
+            type: edgeType,
+            data: {
+              id: r.id,
+              fromTableId: r.fromTableId,
+              fromColumn:  r.fromColumn,
+              toTableId:   r.toTableId,
+              toColumn:    r.toColumn,
+              fromCardinality: r.fromCardinality as RelationData["fromCardinality"],
+              toCardinality:   r.toCardinality   as RelationData["toCardinality"],
+            },
+          }));
+          return { nodes, edges };
+        }),
+
+      updateSettings: (patch) =>
+        set((s) => ({ settings: { ...s.settings, ...patch } })),
+
+      setCurrentFile: (name) => set({ currentFile: name }),
     }),
-}));
+    {
+      // Only track nodes + edges in undo history
+      partialize: (state) => ({
+        nodes: state.nodes,
+        edges: state.edges,
+      }),
+      limit: 50,
+    }
+  )
+);

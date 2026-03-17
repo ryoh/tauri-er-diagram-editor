@@ -14,14 +14,7 @@
 
 import { useCallback } from "react";
 import { useDiagramStore, type CoreDiagram } from "../store/useDiagramStore";
-
-// ---------------------------------------------------------------------------
-// Environment detection
-// ---------------------------------------------------------------------------
-
-function isTauri(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
+import { isTauri } from "../utils/env";
 
 // ---------------------------------------------------------------------------
 // Lazy Wasm loader (shared across import + export)
@@ -79,6 +72,7 @@ export type ExportFormat = "sql" | "hcl" | "html" | "json";
 
 export function useFileSystem() {
   const importFromCore = useDiagramStore((s) => s.importFromCore);
+  const setCurrentFile = useDiagramStore((s) => s.setCurrentFile);
   const nodes          = useDiagramStore((s) => s.nodes);
   const edges          = useDiagramStore((s) => s.edges);
 
@@ -87,16 +81,22 @@ export function useFileSystem() {
   const importHcl = useCallback(async () => {
     try {
       let json: string;
+      let filename: string;
       if (isTauri()) {
         const { invoke } = await import("@tauri-apps/api/core");
-        json = await invoke<string>("import_atlas_hcl");
+        const result = await invoke<{ json: string; filename: string }>("import_atlas_hcl");
+        json     = result.json;
+        filename = result.filename;
       } else {
-        const text = await pickFileAsText(".hcl");
+        const file = await pickFile(".hcl");
         const wasm = await getWasm();
-        json = wasm.import_hcl(text);
+        const text = await readFileAsText(file);
+        json     = wasm.import_hcl(text);
+        filename = file.name;
       }
       const diagram: CoreDiagram = JSON.parse(json);
       importFromCore(diagram);
+      setCurrentFile(filename);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg !== "No file selected" && msg !== "Cancelled") {
@@ -104,7 +104,7 @@ export function useFileSystem() {
         alert(`インポートエラー: ${msg}`);
       }
     }
-  }, [importFromCore]);
+  }, [importFromCore, setCurrentFile]);
 
   // ── EXPORT ────────────────────────────────────────────────────────────────
 
@@ -157,7 +157,7 @@ export function useFileSystem() {
 // Utilities
 // ---------------------------------------------------------------------------
 
-function pickFileAsText(accept: string): Promise<string> {
+function pickFile(accept: string): Promise<File> {
   return new Promise((resolve, reject) => {
     const input = document.createElement("input");
     input.type = "file";
@@ -165,12 +165,18 @@ function pickFileAsText(accept: string): Promise<string> {
     input.onchange = () => {
       const file = input.files?.[0];
       if (!file) { reject(new Error("No file selected")); return; }
-      const reader = new FileReader();
-      reader.onload  = () => resolve(reader.result as string);
-      reader.onerror = () => reject(new Error("Failed to read file"));
-      reader.readAsText(file);
+      resolve(file);
     };
     input.oncancel = () => reject(new Error("Cancelled"));
     input.click();
+  });
+}
+
+function readFileAsText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload  = () => resolve(reader.result as string);
+    reader.onerror = () => reject(new Error("Failed to read file"));
+    reader.readAsText(file);
   });
 }
