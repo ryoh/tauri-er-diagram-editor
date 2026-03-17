@@ -12,7 +12,6 @@ import type { TableData, RelationData, EntityType } from "../types/diagram";
 
 export type DiagramMode = "ie" | "t-shape";
 
-/** Shape of the JSON returned by core::parse_atlas_hcl (camelCase via serde) */
 export interface CoreDiagram {
   tables: CoreTable[];
   relations: CoreRelation[];
@@ -48,7 +47,10 @@ interface DiagramState {
   nodes: Node<TableData>[];
   edges: Edge<RelationData>[];
   settings: DiagramSettings;
-  currentFile: string | null;
+  /** Full OS path in Tauri; filename in Web; null when unsaved */
+  currentFilePath: string | null;
+  /** True when there are unsaved changes */
+  isDirty: boolean;
 
   setMode: (mode: DiagramMode) => void;
   setNodes: (nodes: Node<TableData>[]) => void;
@@ -59,23 +61,23 @@ interface DiagramState {
   updateTableData: (id: string, data: Partial<TableData>) => void;
   addRelation: (relation: RelationData) => void;
   removeRelation: (id: string) => void;
-  /** Replace the entire canvas with data parsed by the Rust core. */
   importFromCore: (diagram: CoreDiagram) => void;
+  /** Clear canvas — does NOT set isDirty */
+  clearDiagram: () => void;
   updateSettings: (patch: Partial<DiagramSettings>) => void;
-  setCurrentFile: (name: string | null) => void;
+  setCurrentFilePath: (path: string | null) => void;
+  setIsDirty: (v: boolean) => void;
 }
 
-// Sample data for development
+// ---------------------------------------------------------------------------
+// Sample data
+// ---------------------------------------------------------------------------
+
 const SAMPLE_NODES: Node<TableData>[] = [
   {
-    id: "users",
-    type: "tableNode",
-    position: { x: 80, y: 80 },
+    id: "users", type: "tableNode", position: { x: 80, y: 80 },
     data: {
-      id: "users",
-      name: "users",
-      logicalName: "ユーザー",
-      entityType: "resource",
+      id: "users", name: "users", logicalName: "ユーザー", entityType: "resource",
       columns: [
         { name: "id",         dataType: "BIGINT",       isPk: true,  isFk: false, notNull: true,  comment: "Primary key" },
         { name: "name",       dataType: "VARCHAR(100)", isPk: false, isFk: false, notNull: true,  comment: "ユーザー名" },
@@ -85,14 +87,9 @@ const SAMPLE_NODES: Node<TableData>[] = [
     },
   },
   {
-    id: "orders",
-    type: "tableNode",
-    position: { x: 420, y: 80 },
+    id: "orders", type: "tableNode", position: { x: 420, y: 80 },
     data: {
-      id: "orders",
-      name: "orders",
-      logicalName: "注文",
-      entityType: "event",
+      id: "orders", name: "orders", logicalName: "注文", entityType: "event",
       columns: [
         { name: "id",         dataType: "BIGINT",    isPk: true,  isFk: false, notNull: true,  comment: "Primary key" },
         { name: "user_id",    dataType: "BIGINT",    isPk: false, isFk: true,  notNull: true,  comment: "FK: users.id" },
@@ -102,14 +99,9 @@ const SAMPLE_NODES: Node<TableData>[] = [
     },
   },
   {
-    id: "products",
-    type: "tableNode",
-    position: { x: 420, y: 320 },
+    id: "products", type: "tableNode", position: { x: 420, y: 320 },
     data: {
-      id: "products",
-      name: "products",
-      logicalName: "商品",
-      entityType: "normal",
+      id: "products", name: "products", logicalName: "商品", entityType: "normal",
       columns: [
         { name: "id",    dataType: "BIGINT",       isPk: true,  isFk: false, notNull: true,  comment: "" },
         { name: "name",  dataType: "VARCHAR(200)", isPk: false, isFk: false, notNull: true,  comment: "商品名" },
@@ -121,21 +113,19 @@ const SAMPLE_NODES: Node<TableData>[] = [
 
 const SAMPLE_EDGES: Edge<RelationData>[] = [
   {
-    id: "rel-users-orders",
-    source: "users",
-    target: "orders",
-    type: "ieEdge",
+    id: "rel-users-orders", source: "users", target: "orders", type: "ieEdge",
     data: {
       id: "rel-users-orders",
-      fromTableId: "users",
-      fromColumn: "id",
-      toTableId: "orders",
-      toColumn: "user_id",
-      fromCardinality: "one",
-      toCardinality: "zeroOrMany",
+      fromTableId: "users",   fromColumn: "id",
+      toTableId:   "orders",  toColumn:   "user_id",
+      fromCardinality: "one", toCardinality: "zeroOrMany",
     },
   },
 ];
+
+// ---------------------------------------------------------------------------
+// Store
+// ---------------------------------------------------------------------------
 
 export const useDiagramStore = create<DiagramState>()(
   temporal(
@@ -149,57 +139,51 @@ export const useDiagramStore = create<DiagramState>()(
         defaultEntityType: "normal",
         defaultMode: "ie",
       },
-      currentFile: null,
+      currentFilePath: null,
+      isDirty: false,
 
       setMode: (mode) =>
         set((s) => ({
           mode,
-          nodes: s.nodes.map((n) => ({
-            ...n,
-            type: mode === "ie" ? "tableNode" : "tNode",
-          })),
-          edges: s.edges.map((e) => ({
-            ...e,
-            type: mode === "ie" ? "ieEdge" : "tEdge",
-          })),
+          nodes: s.nodes.map((n) => ({ ...n, type: mode === "ie" ? "tableNode" : "tNode" })),
+          edges: s.edges.map((e) => ({ ...e, type: mode === "ie" ? "ieEdge" : "tEdge" })),
         })),
 
-      setNodes: (nodes) => set({ nodes }),
+      // setNodes used by auto-layout → marks dirty
+      setNodes: (nodes) => set({ nodes, isDirty: true }),
 
       onNodesChange: (changes) =>
         set((s) => ({
           nodes: applyNodeChanges(changes, s.nodes as Node[]) as unknown as Node<TableData>[],
+          isDirty: true,
         })),
 
       onEdgesChange: (changes) =>
         set((s) => ({
           edges: applyEdgeChanges(changes, s.edges as Edge[]) as unknown as Edge<RelationData>[],
+          isDirty: true,
         })),
 
       addTable: (table, position = { x: 100, y: 100 }) =>
         set((s) => ({
           nodes: [
             ...s.nodes,
-            {
-              id: table.id,
-              type: s.mode === "ie" ? "tableNode" : "tNode",
-              position,
-              data: table,
-            },
+            { id: table.id, type: s.mode === "ie" ? "tableNode" : "tNode", position, data: table },
           ],
+          isDirty: true,
         })),
 
       removeTable: (id) =>
         set((s) => ({
           nodes: s.nodes.filter((n) => n.id !== id),
           edges: s.edges.filter((e) => e.source !== id && e.target !== id),
+          isDirty: true,
         })),
 
       updateTableData: (id, data) =>
         set((s) => ({
-          nodes: s.nodes.map((n) =>
-            n.id === id ? { ...n, data: { ...n.data, ...data } } : n
-          ),
+          nodes: s.nodes.map((n) => n.id === id ? { ...n, data: { ...n.data, ...data } } : n),
+          isDirty: true,
         })),
 
       addRelation: (relation) =>
@@ -214,56 +198,51 @@ export const useDiagramStore = create<DiagramState>()(
               data: relation,
             },
           ],
+          isDirty: true,
         })),
 
       removeRelation: (id) =>
-        set((s) => ({ edges: s.edges.filter((e) => e.id !== id) })),
+        set((s) => ({ edges: s.edges.filter((e) => e.id !== id), isDirty: true })),
 
       importFromCore: (diagram) =>
         set((s) => {
           const nodeType = s.mode === "ie" ? "tableNode" : "tNode";
           const edgeType = s.mode === "ie" ? "ieEdge" : "tEdge";
-          const nodes: Node<TableData>[] = diagram.tables.map((t) => ({
-            id: t.id,
-            type: nodeType,
-            position: { x: t.position[0], y: t.position[1] },
-            data: {
-              id: t.id,
-              name: t.name,
-              logicalName: t.logicalName,
-              entityType: t.entityType,
-              columns: t.columns,
-            },
-          }));
-          const edges: Edge<RelationData>[] = diagram.relations.map((r) => ({
-            id: r.id,
-            source: r.fromTableId,
-            target: r.toTableId,
-            type: edgeType,
-            data: {
-              id: r.id,
-              fromTableId: r.fromTableId,
-              fromColumn:  r.fromColumn,
-              toTableId:   r.toTableId,
-              toColumn:    r.toColumn,
-              fromCardinality: r.fromCardinality as RelationData["fromCardinality"],
-              toCardinality:   r.toCardinality   as RelationData["toCardinality"],
-            },
-          }));
-          return { nodes, edges };
+          return {
+            nodes: diagram.tables.map((t) => ({
+              id: t.id, type: nodeType,
+              position: { x: t.position[0], y: t.position[1] },
+              data: {
+                id: t.id, name: t.name, logicalName: t.logicalName,
+                entityType: t.entityType, columns: t.columns,
+              },
+            })),
+            edges: diagram.relations.map((r) => ({
+              id: r.id, source: r.fromTableId, target: r.toTableId, type: edgeType,
+              data: {
+                id: r.id,
+                fromTableId: r.fromTableId, fromColumn: r.fromColumn,
+                toTableId: r.toTableId,     toColumn: r.toColumn,
+                fromCardinality: r.fromCardinality as RelationData["fromCardinality"],
+                toCardinality:   r.toCardinality   as RelationData["toCardinality"],
+              },
+            })),
+            isDirty: false,
+          };
         }),
+
+      clearDiagram: () =>
+        set({ nodes: [], edges: [], currentFilePath: null, isDirty: false }),
 
       updateSettings: (patch) =>
         set((s) => ({ settings: { ...s.settings, ...patch } })),
 
-      setCurrentFile: (name) => set({ currentFile: name }),
+      setCurrentFilePath: (path) => set({ currentFilePath: path }),
+
+      setIsDirty: (v) => set({ isDirty: v }),
     }),
     {
-      // Only track nodes + edges in undo history
-      partialize: (state) => ({
-        nodes: state.nodes,
-        edges: state.edges,
-      }),
+      partialize: (state) => ({ nodes: state.nodes, edges: state.edges }),
       limit: 50,
     }
   )
