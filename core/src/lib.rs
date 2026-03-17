@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
+use sqlparser::dialect::MySqlDialect;
+use sqlparser::parser::Parser as SqlParser;
+use sqlparser::ast::{Statement, ColumnOption, TableConstraint};
 
 // ---------------------------------------------------------------------------
 // Data structures
@@ -290,6 +293,143 @@ pub fn parse_atlas_hcl(input: &str) -> Result<Diagram, String> {
 }
 
 // ---------------------------------------------------------------------------
+// SQL DDL parser  (CREATE TABLE ... ; statements)
+// ---------------------------------------------------------------------------
+
+/// Parse one or more SQL `CREATE TABLE` statements and return a `Diagram`.
+/// Uses MySQL dialect to support AUTO_INCREMENT, backtick identifiers, etc.
+pub fn parse_sql_ddl(input: &str) -> Result<Diagram, String> {
+    let dialect = MySqlDialect {};
+    let stmts = SqlParser::parse_sql(&dialect, input)
+        .map_err(|e| e.to_string())?;
+
+    let mut tables: Vec<Table> = Vec::new();
+    let mut relations: Vec<Relation> = Vec::new();
+
+    const GRID_X: f64 = 320.0;
+    const GRID_Y: f64 = 260.0;
+    const COLS: usize = 4;
+
+    for stmt in &stmts {
+        let ct = match stmt {
+            Statement::CreateTable(ct) => ct,
+            _ => continue,
+        };
+
+        // ObjectName.to_string() gives the full dotted name; split off schema prefix
+        let table_name = ct.name.to_string()
+            .split('.')
+            .last()
+            .unwrap_or("")
+            .trim_matches('`')
+            .to_string();
+
+        let idx = tables.len();
+        let pos = ((idx % COLS) as f64 * GRID_X + 60.0,
+                   (idx / COLS) as f64 * GRID_Y + 60.0);
+
+        // Collect PK column names from table-level PRIMARY KEY constraint.
+        // In sqlparser 0.61, PrimaryKey is a tuple variant: PrimaryKey(PrimaryKeyConstraint).
+        let mut pk_names: Vec<String> = Vec::new();
+        for constraint in &ct.constraints {
+            if let TableConstraint::PrimaryKey(pk) = constraint {
+                for col in &pk.columns {
+                    // IndexColumn.column is IndexColumnExpr; to_string() gives the ident
+                    pk_names.push(col.column.to_string().trim_matches('`').to_string());
+                }
+            }
+        }
+
+        // Collect FK constraints.
+        // In sqlparser 0.61, ForeignKey is a tuple variant: ForeignKey(ForeignKeyConstraint).
+        struct FkInfo { fk_id: String, from_cols: Vec<String>, to_tbl: String, to_col: String }
+        let mut fk_infos: Vec<FkInfo> = Vec::new();
+        for constraint in &ct.constraints {
+            if let TableConstraint::ForeignKey(fk) = constraint {
+                fk_infos.push(FkInfo {
+                    fk_id: fk.name.as_ref().map(|n| n.value.clone())
+                        .unwrap_or_else(|| format!("fk_{}", relations.len() + fk_infos.len() + 1)),
+                    from_cols: fk.columns.iter().map(|c| c.value.clone()).collect(),
+                    to_tbl: fk.foreign_table.to_string()
+                        .split('.').last().unwrap_or("").trim_matches('`').to_string(),
+                    to_col: fk.referred_columns.first().map(|c| c.value.clone()).unwrap_or_default(),
+                });
+            }
+        }
+
+        // Build columns
+        let mut columns: Vec<Column> = Vec::new();
+        for col_def in &ct.columns {
+            let col_name = col_def.name.value.clone();
+            let data_type = format!("{}", col_def.data_type);
+
+            let mut is_pk = pk_names.contains(&col_name);
+            let mut not_null = is_pk;
+            let is_fk = fk_infos.iter().any(|fk| fk.from_cols.contains(&col_name));
+
+            for opt_def in &col_def.options {
+                match &opt_def.option {
+                    ColumnOption::NotNull => { not_null = true; }
+                    // Column-level PRIMARY KEY (e.g. `id INT PRIMARY KEY`)
+                    ColumnOption::PrimaryKey { .. } => {
+                        is_pk = true;
+                        not_null = true;
+                    }
+                    _ => {}
+                }
+            }
+
+            columns.push(Column { name: col_name, data_type, is_pk, is_fk, not_null, comment: String::new() });
+        }
+
+        // Build relations from FK infos
+        for fk in fk_infos {
+            let from_col = fk.from_cols.first().cloned().unwrap_or_default();
+            if !from_col.is_empty() && !fk.to_tbl.is_empty() {
+                relations.push(Relation {
+                    id: fk.fk_id,
+                    from_table_id: table_name.clone(),
+                    from_column: from_col,
+                    to_table_id: fk.to_tbl,
+                    to_column: fk.to_col,
+                    from_cardinality: Cardinality::ZeroOrMany,
+                    to_cardinality: Cardinality::One,
+                });
+            }
+        }
+
+        tables.push(Table {
+            id: table_name.clone(),
+            name: table_name,
+            logical_name: String::new(),
+            entity_type: EntityType::Normal,
+            columns,
+            position: pos,
+        });
+    }
+
+    Ok(Diagram { tables, relations })
+}
+
+// ---------------------------------------------------------------------------
+// Auto-detect: HCL or SQL
+// ---------------------------------------------------------------------------
+
+/// Detect whether `input` looks like SQL DDL and dispatch to the right parser.
+pub fn parse_auto(input: &str) -> Result<Diagram, String> {
+    let first = input.trim_start();
+    let upper = first[..first.len().min(30)].to_uppercase();
+    if upper.starts_with("CREATE")
+        || upper.starts_with("--")
+        || upper.starts_with("/*")
+    {
+        parse_sql_ddl(input)
+    } else {
+        parse_atlas_hcl(input)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // wasm-bindgen public API
 // ---------------------------------------------------------------------------
 
@@ -309,6 +449,22 @@ pub fn parse_diagram(json: &str) -> Result<String, JsValue> {
 #[wasm_bindgen]
 pub fn import_hcl(hcl_str: &str) -> Result<String, JsValue> {
     parse_atlas_hcl(hcl_str)
+        .and_then(|d| d.to_json().map_err(|e| e.to_string()))
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Parse a SQL DDL string and return a Diagram JSON (Wasm/Web entry point).
+#[wasm_bindgen]
+pub fn import_sql(sql_str: &str) -> Result<String, JsValue> {
+    parse_sql_ddl(sql_str)
+        .and_then(|d| d.to_json().map_err(|e| e.to_string()))
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Auto-detect format (HCL or SQL) and return a Diagram JSON.
+#[wasm_bindgen]
+pub fn import_auto(input: &str) -> Result<String, JsValue> {
+    parse_auto(input)
         .and_then(|d| d.to_json().map_err(|e| e.to_string()))
         .map_err(|e| JsValue::from_str(&e))
 }
@@ -414,5 +570,104 @@ table "orders" "public" {
         let json = d.to_json().unwrap();
         let d2 = Diagram::from_json(&json).unwrap();
         assert_eq!(d2.tables.len(), 0);
+    }
+
+    // ── SQL tests ────────────────────────────────────────────────────────────
+
+    const SAMPLE_SQL: &str = r#"
+CREATE TABLE users (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  email VARCHAR(255) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_users_email (email)
+);
+"#;
+
+    #[test]
+    fn parses_sql_table_name() {
+        let d = parse_sql_ddl(SAMPLE_SQL).unwrap();
+        assert_eq!(d.tables.len(), 1);
+        assert_eq!(d.tables[0].name, "users");
+    }
+
+    #[test]
+    fn parses_sql_columns() {
+        let d = parse_sql_ddl(SAMPLE_SQL).unwrap();
+        let t = &d.tables[0];
+        // INDEX declarations should not appear as columns
+        let col_names: Vec<&str> = t.columns.iter().map(|c| c.name.as_str()).collect();
+        assert!(col_names.contains(&"id"));
+        assert!(col_names.contains(&"name"));
+        assert!(col_names.contains(&"email"));
+        assert!(col_names.contains(&"created_at"));
+    }
+
+    #[test]
+    fn parses_sql_pk_and_not_null() {
+        let d = parse_sql_ddl(SAMPLE_SQL).unwrap();
+        let t = &d.tables[0];
+        let id_col = t.columns.iter().find(|c| c.name == "id").unwrap();
+        assert!(id_col.is_pk, "id should be PK");
+        assert!(id_col.not_null, "id should be NOT NULL");
+        let name_col = t.columns.iter().find(|c| c.name == "name").unwrap();
+        assert!(name_col.not_null, "name should be NOT NULL");
+    }
+
+    #[test]
+    fn auto_detect_sql() {
+        let d = parse_auto(SAMPLE_SQL).unwrap();
+        assert_eq!(d.tables[0].name, "users");
+    }
+
+    #[test]
+    fn auto_detect_hcl() {
+        let d = parse_auto(SAMPLE_HCL).unwrap();
+        assert_eq!(d.tables.len(), 2);
+    }
+
+    // ── sample/users.hcl format ─────────────────────────────────────────────
+    // Single label, schema attribute inside table block, separate schema block
+
+    const USERS_HCL: &str = r#"
+table "users" {
+  schema = schema.example
+  column "id" {
+    null = false
+    type = int
+  }
+  column "name" {
+    null = true
+    type = varchar(100)
+  }
+  primary_key {
+    columns = [column.id]
+  }
+}
+schema "example" {
+  charset = "utf8mb4"
+  collate = "utf8mb4_0900_ai_ci"
+}
+"#;
+
+    #[test]
+    fn parses_single_label_table() {
+        let d = parse_atlas_hcl(USERS_HCL).unwrap();
+        assert_eq!(d.tables.len(), 1);
+        assert_eq!(d.tables[0].name, "users");
+    }
+
+    #[test]
+    fn parses_users_hcl_columns() {
+        let d = parse_atlas_hcl(USERS_HCL).unwrap();
+        let t = &d.tables[0];
+        assert_eq!(t.columns.len(), 2);
+        let id_col = t.columns.iter().find(|c| c.name == "id").unwrap();
+        assert_eq!(id_col.data_type, "INT");
+        assert!(id_col.is_pk);
+        assert!(id_col.not_null);
+        let name_col = t.columns.iter().find(|c| c.name == "name").unwrap();
+        assert_eq!(name_col.data_type, "VARCHAR(100)");
+        assert!(!name_col.not_null);
     }
 }

@@ -22,7 +22,7 @@ async fn import_atlas_hcl(app: tauri::AppHandle) -> Result<String, String> {
     let hcl_str = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read file: {e}"))?;
 
-    // 3. Parse and return JSON
+    // 3. Parse as Atlas HCL and return JSON
     parse_atlas_hcl(&hcl_str)
         .and_then(|d| d.to_json().map_err(|e| e.to_string()))
 }
