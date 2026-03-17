@@ -10,7 +10,8 @@
       "Bash(cargo build:*)",
       "Bash(pnpm tauri:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(pnpm tsc:*)"
     ]
   }
 }
